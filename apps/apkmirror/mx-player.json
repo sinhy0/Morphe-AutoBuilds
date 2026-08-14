@@ -1,7 +1,7 @@
 {
     "org": "amazon-mobile-llc",
     "name": "mx-player",
-    "type": "BUNDLE",
+    "type": "APK",
     "arch": "arm64-v8a + armeabi-v7a",
     "dpi": "120-640dpi",
     "package": "com.mxtech.videoplayer.pro",
