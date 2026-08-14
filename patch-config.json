@@ -97,6 +97,6 @@
     { "app_name": "gamehub", "source": "liaralabs" },
     { "app_name": "dialer", "source": "taknok" },
     { "app_name": "windscribe", "source": "rushiranpise-dev" },
-    { "app_name": "mx-player-pro", "source": "ftl-patches" }
+    { "app_name": "mx-player", "source": "ftl-patches" }
   ]
 }
