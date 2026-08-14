@@ -6,6 +6,12 @@
     "dpi": "nodpi",
     "package": "com.mxtech.videoplayer.pro",
     "version": "",
+    "patches": [
+        "Hide File Transfer, Video Playlist, Private Folder tiles",
+        "Hide Me tab promo items",
+        "Hide local tiles banner",
+        "Skip welcome screen"
+    ],
     "included_patches": [
         "Hide File Transfer, Video Playlist, Private Folder tiles",
         "Hide Me tab promo items",
