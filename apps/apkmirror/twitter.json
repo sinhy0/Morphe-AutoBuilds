@@ -3,7 +3,7 @@
     "name": "twitter",
     "type": "APK",
     "arch": "arm64-v8a",
-    "dpi": "",
+    "dpi": "120-640",
     "package": "com.twitter.android",
     "version": ""
 }
