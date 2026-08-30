@@ -98,5 +98,6 @@
     { "app_name": "dialer", "source": "taknok" },
     { "app_name": "windscribe", "source": "rushiranpise-dev" }
     { "app_name": "youtube", "source": "morphe" }
+    { "app_name": "twitter", "source": "piko" }
   ]
 }
