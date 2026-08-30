@@ -462,6 +462,18 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         logging.error(f"Could not find any release page for {app_name} {version}")
         return None
     
+    # --- DEBUG: SAVE APKMIRROR HTML ---
+    try:
+        with open("apkmirror_debug.html", "w", encoding="utf-8") as debug_file:
+            debug_file.write(str(found_soup))
+        logging.info(
+            f"DEBUG: saved APKMirror HTML ({len(str(found_soup))} bytes)"
+        )
+    except Exception as debug_error:
+        logging.warning(
+            f"DEBUG: could not save APKMirror HTML: {debug_error}"
+        )
+
     # --- VARIANT FINDER ---
 
     def _clean_text(value):
