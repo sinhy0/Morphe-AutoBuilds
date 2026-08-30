@@ -208,11 +208,12 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> list[st
         # We still try `list-versions` first because it's lighter, but if it
         # yields too little info we fall back to parsing `list-patches`.
         cmd = [
-            'java', '-jar', cli,
-            'list-versions',
-            '-f', package_name,
-            '--patches', patches
-        ]
+    'java', '-jar', cli,
+    'list-versions',
+    '-f', package_name,
+    '--patches', patches,
+    '--include-experimental'
+]
     elif is_revanced_v6_or_newer:
         cmd = [
             'java', '-jar', cli,
