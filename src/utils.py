@@ -195,44 +195,72 @@ def get_highest_version(versions: list[str]) -> str | None:
     return highest_version
 
 def get_supported_versions(package_name: str, cli: str, patches: str) -> list[str]:
-    # Morphe CLI and ReVanced CLI have different list-versions syntax
+    """Return the newest supported app versions from Morphe/ReVanced.
+
+    For Morphe:
+    - Include experimental app versions.
+    - Include unused patches when calculating compatible versions.
+    - Prefer the versions reported by list-versions.
+    """
+
     cli_name = Path(cli).name.lower()
-    is_morphe_cli = 'morphe' in cli_name
-    is_revanced_v6_or_newer = 'revanced-cli-6' in cli_name or 'revanced-cli-7' in cli_name or 'revanced-cli-8' in cli_name
+    is_morphe_cli = "morphe" in cli_name
+    is_revanced_v6_or_newer = (
+        "revanced-cli-6" in cli_name
+        or "revanced-cli-7" in cli_name
+        or "revanced-cli-8" in cli_name
+    )
 
     if is_morphe_cli:
-        # Morphe CLI docs officially describe `list-patches --with-packages --with-versions`
-        # (and the output tends to include more complete version information than
-        # `list-versions`, which may only show "most common" compatible versions).
-        #
-        # We still try `list-versions` first because it's lighter, but if it
-        # yields too little info we fall back to parsing `list-patches`.
         cmd = [
-    'java', '-jar', cli,
-    'list-versions',
-    '-f', package_name,
-    '--patches', patches,
-    '--include-experimental'
-]
-    elif is_revanced_v6_or_newer:
-        cmd = [
-            'java', '-jar', cli,
-            'list-versions',
-            '-p', patches, '-b',
-            '-f', package_name
-        ]
-    else:
-        # ReVanced CLI: pass patches as positional arg
-        cmd = [
-            'java', '-jar', cli,
-            'list-versions',
-            '-f', package_name,
-            patches
+            "java",
+            "-jar",
+            cli,
+            "list-versions",
+            "-f",
+            package_name,
+            "--patches",
+            patches,
+            "--include-experimental",
+            "--count-unused-patches",
         ]
 
-    # We want the raw output even if the CLI returns a non-zero exit code (bad
-    # args, missing patches, etc.) so we can decide what to do.
-    output = run_process(cmd, capture=True, silent=True, check=False)
+        # If patches is a GitHub/GitLab repository URL, explicitly request
+        # the latest development/pre-release patch bundle.
+        if patches.startswith("https://github.com/") or \
+           patches.startswith("https://gitlab.com/"):
+            cmd.append("--prerelease")
+
+    elif is_revanced_v6_or_newer:
+        cmd = [
+            "java",
+            "-jar",
+            cli,
+            "list-versions",
+            "-p",
+            patches,
+            "-b",
+            "-f",
+            package_name,
+        ]
+
+    else:
+        cmd = [
+            "java",
+            "-jar",
+            cli,
+            "list-versions",
+            "-f",
+            package_name,
+            patches,
+        ]
+
+    output = run_process(
+        cmd,
+        capture=True,
+        silent=True,
+        check=False,
+    )
 
     if not output:
         logging.warning("No output returned from list-versions command")
@@ -241,64 +269,108 @@ def get_supported_versions(package_name: str, cli: str, patches: str) -> list[st
     lines = output.splitlines()
     logging.info(f"CLI raw output lines: {lines}")
 
-    # Detect CLI error/usage output (wrong syntax, unrecognized args, etc.)
-    first_line = lines[0].strip().lower()
-    if 'usage:' in first_line or 'unmatched argument' in first_line or 'error' in first_line:
-        logging.warning(f"CLI returned error/usage output, cannot determine version")
-        return []
+    # Detect CLI errors.
+    first_line = lines[0].strip().lower() if lines else ""
 
-    if len(lines) <= 2:
-        logging.warning("Output has no version lines")
+    if (
+        "usage:" in first_line
+        or "unmatched argument" in first_line
+        or first_line.startswith("error")
+    ):
+        logging.warning(
+            f"CLI returned error/usage output: {lines}"
+        )
         return []
 
     versions = []
-    for line in lines[2:]:
-        line = line.strip()
-        if line and 'Any' not in line:
-            # Parse version - may include "build XXX" suffix
-            # Format: "6.6 build 002" or "32.30.0(1575420)" or just "6.6"
-            parts = line.split()
-            if parts:
-                version = parts[0]
-                # Validate it looks like a version (starts with a digit)
-                if not version[0].isdigit():
-                    continue
-                # Check if next parts are "build XXX"
-                if len(parts) >= 3 and parts[1].lower() == 'build':
-                    version = f"{parts[0]} build {parts[2]}"
-                versions.append(version)
 
-    # If Morphe CLI only returned a tiny "most common" list (or nothing),
-    # attempt to derive a fuller candidate set from `list-patches`.
-    if is_morphe_cli and len(versions) <= 1:
+    for line in lines:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # Ignore informational/header lines.
+        if (
+            line.startswith("INFO:")
+            or line.lower().startswith("most common compatible versions")
+            or "package name:" in line.lower()
+        ):
+            continue
+
+        # Expected formats:
+        #   21.35.442 (79 patches)
+        #   6.6 build 002
+        #   32.30.0(1575420)
+        match = re.match(
+            r"^(\d+(?:\.\d+)+(?:\(\d+\))?(?:\s+build\s+\d+)?)",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            versions.append(match.group(1))
+
+    # Fallback: list-patches with experimental versions.
+    if is_morphe_cli and not versions:
         try:
             alt_cmd = [
-                "java", "-jar", cli,
+                "java",
+                "-jar",
+                cli,
                 "list-patches",
+                "--patches",
+                patches,
                 "--with-packages",
                 "--with-versions",
-                patches,
+                "--include-experimental",
             ]
-            alt_out = run_process(alt_cmd, capture=True, silent=True, check=False) or ""
-            derived: list[str] = []
-            for ln in alt_out.splitlines():
-                if package_name not in ln:
+
+            if patches.startswith("https://github.com/") or \
+               patches.startswith("https://gitlab.com/"):
+                alt_cmd.append("--prerelease")
+
+            alt_out = (
+                run_process(
+                    alt_cmd,
+                    capture=True,
+                    silent=True,
+                    check=False,
+                )
+                or ""
+            )
+
+            for line in alt_out.splitlines():
+                if package_name not in line:
                     continue
-                # Grab any versions mentioned on the same line as the package name.
-                for m in re.finditer(r"\d+(?:\.\d+)+(?:\(\d+\))?", ln):
-                    derived.append(m.group(0))
-            if derived:
-                versions.extend(derived)
-        except Exception:
-            pass
+
+                for match in re.finditer(
+                    r"\d+(?:\.\d+)+(?:\(\d+\))?",
+                    line,
+                ):
+                    versions.append(match.group(0))
+
+        except Exception as e:
+            logging.warning(
+                f"Failed to derive versions from list-patches: {e}"
+            )
 
     if not versions:
-        logging.warning("No supported versions found")
+        logging.warning(
+            f"No supported versions found for {package_name}"
+        )
         return []
 
-    # Sort highest -> lowest.
-    versions = sorted(set(versions), key=normalize_version, reverse=True)
-    logging.info(f"CLI parsed versions: {versions}")
+    versions = sorted(
+        set(versions),
+        key=normalize_version,
+        reverse=True,
+    )
+
+    logging.info(
+        f"CLI parsed versions for {package_name}: {versions}"
+    )
+
     return versions
 
 
