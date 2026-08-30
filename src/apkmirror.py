@@ -462,24 +462,53 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         logging.error(f"Could not find any release page for {app_name} {version}")
         return None
     
-        # --- VARIANT FINDER ---
-    # Priority:
-    # 1. arm64-v8a
-    # 2. Highest available DPI within the configured range
-    # 3. Then progressively lower DPI
-    # 4. If arm64-v8a does not exist at all -> universal
-    # 5. Apply the exact same DPI rule to universal
+           # --- VARIANT FINDER ---
     #
-    # Accepted types: APK and BUNDLE
-    # Never fall back to armeabi-v7a or other architectures.
+    # Selection priority:
+    #
+    # 1. arm64-v8a has absolute priority.
+    #
+    # 2. If an exact DPI RANGE variant exists
+    #    (example: 480-640dpi), select it first.
+    #
+    # 3. If the exact range does not exist:
+    #    select the highest individual DPI inside the range,
+    #    then progressively lower values.
+    #
+    # 4. If there are no DPI values inside the configured range:
+    #    search outside the range, starting from the highest
+    #    available DPI and going downward.
+    #
+    # 5. Only if arm64-v8a does not exist at all,
+    #    fall back to universal.
+    #
+    # 6. universal follows exactly the same DPI rules.
+    #
+    # 7. APK and BUNDLE are both accepted.
+    # 8. Never select armeabi-v7a or another architecture.
 
-    rows = found_soup.find_all('div', class_='table-row headerFont')
+    rows = found_soup.find_all(
+        'div',
+        class_='table-row headerFont'
+    )
+
     download_page_url = None
 
-    requested_arch = str(target_arch or '').strip().lower()
-    requested_dpi = str(config.get('dpi', '')).strip().lower()
+    requested_arch = str(
+        target_arch or ''
+    ).strip().lower()
 
-    # Parse configured DPI range, e.g. "480-640dpi"
+    requested_dpi = str(
+        config.get('dpi', '')
+    ).strip().lower()
+
+    # ---------------------------------------------------------
+    # Parse configured DPI range
+    # Example:
+    #   480-640dpi
+    #   120-640dpi
+    # ---------------------------------------------------------
+
     dpi_range_match = re.search(
         r'(\d+)\s*-\s*(\d+)\s*dpi',
         requested_dpi,
@@ -487,8 +516,12 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
     )
 
     if dpi_range_match:
-        dpi_min = int(dpi_range_match.group(1))
-        dpi_max = int(dpi_range_match.group(2))
+        dpi_min = int(
+            dpi_range_match.group(1)
+        )
+        dpi_max = int(
+            dpi_range_match.group(2)
+        )
     else:
         single_dpi_match = re.search(
             r'(\d+)\s*dpi',
@@ -497,19 +530,34 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         )
 
         if single_dpi_match:
-            dpi_min = int(single_dpi_match.group(1))
+            dpi_min = int(
+                single_dpi_match.group(1)
+            )
             dpi_max = dpi_min
         else:
             dpi_min = 0
             dpi_max = 10000
 
+    # ---------------------------------------------------------
+    # Extract information from each variant row
+    # ---------------------------------------------------------
+
     def extract_variant(row):
-        text = row.get_text(" ", strip=True)
+
+        text = row.get_text(
+            " ",
+            strip=True
+        )
+
         lower = text.lower()
 
-        # Accept APK or BUNDLE
+        # APK or BUNDLE
         is_apk = bool(
-            re.search(r'\bAPK\b', text, re.IGNORECASE)
+            re.search(
+                r'\bAPK\b',
+                text,
+                re.IGNORECASE
+            )
         )
 
         is_bundle = bool(
@@ -523,17 +571,27 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         if not (is_apk or is_bundle):
             return None
 
-        # Detect architectures present in this row
+        # -----------------------------------------------------
+        # Architectures
+        # -----------------------------------------------------
+
         architectures = set()
 
-        for match in re.finditer(
+        architecture_matches = re.findall(
             r'\b(?:arm64-v8a|armeabi-v7a|x86_64|x86|universal)\b',
             lower,
             re.IGNORECASE
-        ):
-            architectures.add(match.group(0).lower())
+        )
 
-        # Extract individual DPI values
+        for architecture in architecture_matches:
+            architectures.add(
+                architecture.lower()
+            )
+
+        # -----------------------------------------------------
+        # Individual DPI values
+        # -----------------------------------------------------
+
         dpis = []
 
         for match in re.finditer(
@@ -541,12 +599,23 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             lower,
             re.IGNORECASE
         ):
-            dpi = int(match.group(1))
+            dpi = int(
+                match.group(1)
+            )
 
-            if dpi_min <= dpi <= dpi_max:
-                dpis.append(dpi)
+            dpis.append(dpi)
 
-        # Handle ranges such as 480-640dpi
+        # -----------------------------------------------------
+        # DPI ranges displayed by APKMirror
+        #
+        # Example:
+        #   480-640dpi
+        #
+        # Keep the entire range as an exact-range candidate.
+        # -----------------------------------------------------
+
+        dpi_ranges = []
+
         for low, high in re.findall(
             r'(\d+)\s*-\s*(\d+)\s*dpi',
             lower,
@@ -555,13 +624,31 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             low = int(low)
             high = int(high)
 
-            overlap_low = max(low, dpi_min)
-            overlap_high = min(high, dpi_max)
+            dpi_ranges.append(
+                (low, high)
+            )
+
+            # Also expose the highest DPI from the range
+            # for fallback ordering.
+            overlap_low = max(
+                low,
+                dpi_min
+            )
+
+            overlap_high = min(
+                high,
+                dpi_max
+            )
 
             if overlap_low <= overlap_high:
-                dpis.append(overlap_high)
+                dpis.append(
+                    overlap_high
+                )
 
-        dpis = sorted(set(dpis), reverse=True)
+        dpis = sorted(
+            set(dpis),
+            reverse=True
+        )
 
         href_element = row.find(
             'a',
@@ -571,7 +658,9 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         if not href_element:
             return None
 
-        href = href_element.get('href')
+        href = href_element.get(
+            'href'
+        )
 
         if not href:
             return None
@@ -583,57 +672,187 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             "is_bundle": is_bundle,
             "architectures": architectures,
             "dpis": dpis,
+            "dpi_ranges": dpi_ranges,
             "href": href,
         }
+
+    # ---------------------------------------------------------
+    # Build variant list
+    # ---------------------------------------------------------
 
     variants = []
 
     for row in rows:
-        variant = extract_variant(row)
+
+        variant = extract_variant(
+            row
+        )
 
         if variant:
-            variants.append(variant)
+            variants.append(
+                variant
+            )
 
-    def select_best_variant(architecture):
-        """Select the highest available DPI within the configured range."""
+    # ---------------------------------------------------------
+    # Select the best variant for an architecture
+    # ---------------------------------------------------------
+
+    def select_best_variant(
+        architecture
+    ):
 
         matching = [
             variant
             for variant in variants
-            if architecture.lower() in variant["architectures"]
+            if architecture.lower()
+            in variant["architectures"]
         ]
 
         if not matching:
             return None
 
-        # Only variants with a DPI inside the requested range
-        # are eligible.
-        matching_with_dpi = [
-            variant
-            for variant in matching
-            if variant["dpis"]
-        ]
+        # =====================================================
+        # PRIORITY 1
+        # Exact configured DPI range
+        #
+        # Example:
+        # requested = 480-640dpi
+        # row      = 480-640dpi
+        #
+        # This ALWAYS wins.
+        # =====================================================
 
-        if not matching_with_dpi:
-            return None
+        exact_range_matches = []
 
-        # Highest DPI first.
-        # If DPI is equal, APK has priority over BUNDLE.
-        matching_with_dpi.sort(
-            key=lambda variant: (
-                max(variant["dpis"]),
-                1 if variant["is_apk"] else 0
-            ),
-            reverse=True
-        )
+        for variant in matching:
 
-        return matching_with_dpi[0]
+            for low, high in variant["dpi_ranges"]:
+
+                if (
+                    low == dpi_min
+                    and high == dpi_max
+                ):
+                    exact_range_matches.append(
+                        variant
+                    )
+                    break
+
+        if exact_range_matches:
+
+            # APK before BUNDLE if both have the exact range.
+            exact_range_matches.sort(
+                key=lambda variant: (
+                    1 if variant["is_apk"]
+                    else 0
+                ),
+                reverse=True
+            )
+
+            return exact_range_matches[0]
+
+        # =====================================================
+        # PRIORITY 2
+        # Highest individual DPI inside configured range
+        #
+        # Example:
+        #
+        # 640
+        # 600
+        # 560
+        # 520
+        # 480
+        #
+        # =====================================================
+
+        inside_range = []
+
+        for variant in matching:
+
+            valid_dpis = [
+                dpi
+                for dpi in variant["dpis"]
+                if dpi_min <= dpi <= dpi_max
+            ]
+
+            if valid_dpis:
+
+                highest_dpi = max(
+                    valid_dpis
+                )
+
+                inside_range.append(
+                    (
+                        highest_dpi,
+                        variant
+                    )
+                )
+
+        if inside_range:
+
+            # Highest DPI first.
+            # APK wins when DPI is identical.
+            inside_range.sort(
+                key=lambda item: (
+                    item[0],
+                    1 if item[1]["is_apk"]
+                    else 0
+                ),
+                reverse=True
+            )
+
+            return inside_range[0][1]
+
+        # =====================================================
+        # PRIORITY 3
+        # Nothing inside the configured range.
+        #
+        # Search OUTSIDE the range.
+        #
+        # Start from the highest available DPI and go downward.
+        # =====================================================
+
+        outside_range = []
+
+        for variant in matching:
+
+            for dpi in variant["dpis"]:
+
+                if not (
+                    dpi_min <= dpi <= dpi_max
+                ):
+                    outside_range.append(
+                        (
+                            dpi,
+                            variant
+                        )
+                    )
+
+        if outside_range:
+
+            # Highest DPI first.
+            # APK wins when DPI is identical.
+            outside_range.sort(
+                key=lambda item: (
+                    item[0],
+                    1 if item[1]["is_apk"]
+                    else 0
+                ),
+                reverse=True
+            )
+
+            return outside_range[0][1]
+
+        # Nothing usable.
+        return None
 
     # =========================================================
-    # STEP 1: arm64-v8a
+    # STEP 1
+    # arm64-v8a has absolute priority
     # =========================================================
 
-    selected_variant = select_best_variant(requested_arch)
+    selected_variant = select_best_variant(
+        requested_arch
+    )
 
     if selected_variant:
 
@@ -641,43 +860,48 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
     else:
 
+        # -----------------------------------------------------
         # Check whether arm64-v8a exists at all.
+        #
+        # If it exists but no usable DPI exists, we DO NOT
+        # fall back to universal.
+        # -----------------------------------------------------
+
         arm64_exists = any(
-            requested_arch in variant["architectures"]
+            requested_arch
+            in variant["architectures"]
             for variant in variants
         )
 
-        # =====================================================
-        # STEP 2: universal ONLY if arm64-v8a doesn't exist
-        # =====================================================
+        if arm64_exists:
 
-        if not arm64_exists:
-
-            logging.info(
-                f"No {requested_arch} variant exists for "
-                f"{app_name} {version}; trying universal"
-            )
-
-            selected_variant = select_best_variant(
-                "universal"
-            )
-
-            selected_arch = "universal"
-
-        else:
-
-            # arm64-v8a exists, but none matched the DPI range.
-            # Do NOT fall back to universal.
             logging.error(
-                f"{requested_arch} exists for {app_name} "
-                f"{version}, but no variant has DPI within "
-                f"{dpi_min}-{dpi_max}"
+                f"{requested_arch} exists for "
+                f"{app_name} {version}, but no usable "
+                f"DPI variant was found."
             )
 
             return None
 
+        # =====================================================
+        # STEP 2
+        # No arm64-v8a at all -> universal
+        # =====================================================
+
+        logging.info(
+            f"No {requested_arch} variant exists for "
+            f"{app_name} {version}; trying universal"
+        )
+
+        selected_variant = select_best_variant(
+            "universal"
+        )
+
+        selected_arch = "universal"
+
     # =========================================================
-    # STEP 3: Final selection
+    # STEP 3
+    # Final selection
     # =========================================================
 
     if selected_variant:
@@ -696,14 +920,18 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             else "BUNDLE"
         )
 
-        selected_dpi = max(
-            selected_variant["dpis"]
+        selected_dpis = selected_variant["dpis"]
+
+        selected_dpi = (
+            max(selected_dpis)
+            if selected_dpis
+            else None
         )
 
         logging.info(
-            f"✓ Selected {selected_type} variant for "
-            f"{app_name} {version}: "
-            f"arch={selected_arch}, dpi={selected_dpi}"
+            f"✓ Selected {selected_type} variant: "
+            f"arch={selected_arch}, "
+            f"dpi={selected_dpi}"
         )
 
         logging.info(
@@ -716,15 +944,17 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         logging.error(
             f"No APK/BUNDLE variant found for "
             f"{app_name} {version}. "
-            f"Requested architecture: {requested_arch}, "
-            f"DPI range: {dpi_min}-{dpi_max}"
+            f"Architecture={requested_arch}, "
+            f"DPI={dpi_min}-{dpi_max}"
         )
 
         logging.debug(
             f"Found {len(variants)} APK/BUNDLE variants"
         )
 
-        for index, variant in enumerate(variants[:20]):
+        for index, variant in enumerate(
+            variants[:20]
+        ):
 
             logging.debug(
                 f"Variant {index}: "
