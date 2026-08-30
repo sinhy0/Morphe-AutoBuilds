@@ -807,73 +807,149 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
     # Find candidate rows
     # ---------------------------------------------------------
 
-    rows = found_soup.find_all(
-        'div',
-        class_='table-row'
+   rows = found_soup.find_all(
+    'div',
+    class_='table-row'
+)
+
+variants = []
+
+# أولًا: جرّب table-row الموجودة.
+for index, row in enumerate(rows):
+
+    variant = _extract_variant(
+        row,
+        index
     )
 
-    # Some APKMirror pages may use additional containers.
-    # If the normal rows are not found, inspect elements that
-    # contain both an architecture and an APK/BUNDLE marker.
+    if variant:
+        variants.append(
+            variant
+        )
 
-    if not rows:
-        rows = []
+# إذا لم نجد أي Variants فعلية،
+# لا يهم أن rows كانت موجودة؛ نعمل بحثًا أوسع.
+if not variants:
 
-        for element in found_soup.find_all(
-            ['div', 'tr', 'li']
+    logging.info(
+        "No variants found in table-row elements; "
+        "trying broader APKMirror variant detection..."
+    )
+
+    variants = []
+    seen_links = set()
+
+    for link in found_soup.find_all(
+        'a',
+        href=True
+    ):
+
+        href = link.get(
+            'href',
+            ''
+        ).strip()
+
+        if not href:
+            continue
+
+        link_text = _clean_text(
+            link.get_text(
+                ' ',
+                strip=True
+            )
+        ).lower()
+
+        # نبحث عن روابط لها علاقة بتحميل APK/BUNDLE.
+        if not re.search(
+            r'\b(?:apk|bundle|aab)\b',
+            link_text
         ):
-            text = _clean_text(
-                element.get_text(
-                    " ",
+            continue
+
+        container = link
+
+        # اصعد في شجرة HTML حتى نجد الحاوية
+        # التي تحتوي معلومات architecture / DPI / Android.
+        for _ in range(8):
+
+            parent = container.parent
+
+            if not parent:
+                break
+
+            parent_text = _clean_text(
+                parent.get_text(
+                    ' ',
                     strip=True
                 )
             ).lower()
 
-            if (
+            has_arch = bool(
                 re.search(
-                    r'\b(?:arm64-v8a|universal|armeabi-v7a|x86_64|x86)\b',
-                    text
+                    r'\b(?:arm64-v8a|armeabi-v7a|x86_64|x86|universal)\b',
+                    parent_text
                 )
-                and
-                re.search(
-                    r'\b(?:apk|bundle|aab)\b',
-                    text
-                )
-            ):
-                rows.append(
-                    element
-                )
-
-    variants = []
-
-    for index, row in enumerate(rows):
-
-        variant = _extract_variant(
-            row,
-            index
-        )
-
-        if variant:
-            variants.append(
-                variant
             )
 
-    logging.info(
-        f"Detected {len(variants)} APKMirror variants "
-        f"for {app_name} {version}"
-    )
+            has_dpi = bool(
+                re.search(
+                    r'(?:\d+\s*-\s*\d+\s*dpi|\d+\s*dpi|\bnodpi\b)',
+                    parent_text
+                )
+            )
 
-    # Debug: show detected variants.
-    for variant in variants:
-        logging.info(
-            "Variant: "
-            f"arch={sorted(variant['architectures'])}, "
-            f"dpi_ranges={variant['dpi_ranges']}, "
-            f"dpis={variant['dpis']}, "
-            f"nodpi={variant['is_nodpi']}, "
-            f"type="
-            f"{'APK' if variant['is_apk'] else 'BUNDLE'}"
+            has_android = bool(
+                re.search(
+                    r'\bandroid\s+\d',
+                    parent_text
+                )
+            )
+
+            if has_arch and (
+                has_dpi or has_android
+            ):
+                container = parent
+            else:
+                break
+
+        variant = _extract_variant(
+            container,
+            len(variants)
         )
+
+        if not variant:
+            continue
+
+        variant_href = variant[
+            'href'
+        ]
+
+        if variant_href in seen_links:
+            continue
+
+        seen_links.add(
+            variant_href
+        )
+
+        variants.append(
+            variant
+        )
+
+logging.info(
+    f"Detected {len(variants)} APKMirror variants "
+    f"for {app_name} {version}"
+)
+
+for variant in variants:
+    logging.info(
+        "Variant: "
+        f"arch={sorted(variant['architectures'])}, "
+        f"dpi_ranges={variant['dpi_ranges']}, "
+        f"dpis={variant['dpis']}, "
+        f"nodpi={variant['is_nodpi']}, "
+        f"type="
+        f"{'APK' if variant['is_apk'] else 'BUNDLE'}"
+    )
 
     # ---------------------------------------------------------
     # DPI ranking
