@@ -606,7 +606,7 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
     # Find candidate rows. If APKMirror changes the row class, fall back
     # to walking upward from APK/BUNDLE links.
-    rows = found_soup.find_all('div', class_='table-row')
+    rows = found_soup.find_all('div', class_=lambda classes: classes and 'table-row' in classes)
     variants = []
 
     for index, row in enumerate(rows):
@@ -627,14 +627,30 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             if not href:
                 continue
 
+            # On some APKMirror release pages (including X/Twitter), the
+            # variant link itself contains only the version text while
+            # "BUNDLE", architecture, Android version and DPI are rendered
+            # by sibling elements in the same container. Therefore we must
+            # NOT require the anchor text to contain "APK"/"BUNDLE".
             link_text = _clean_text(link.get_text(' ', strip=True)).lower()
 
-            if not re.search(r'\b(?:apk|bundle|aab)\b', link_text):
+            # Keep this focused on APKMirror variant/release links.
+            # Ignore navigation, image, FAQ and external links.
+            if not (
+                href.startswith('/apk/')
+                or '/download/' in href
+                or 'download' in href.lower()
+            ):
                 continue
 
             container = link
+            best_container = None
 
-            for _ in range(8):
+            # Walk upward until we reach a container that contains the
+            # complete variant metadata. APKMirror has changed the exact
+            # DOM structure/classes over time, so rely on the content
+            # rather than a single CSS class.
+            for _ in range(12):
                 parent = container.parent
                 if not parent:
                     break
@@ -644,7 +660,7 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
                 ).lower()
 
                 has_arch = bool(re.search(
-                    r'\b(?:arm64-v8a|armeabi-v7a|x86_64|x86|universal)\b',
+                    r'\b(?:arm64-v8a|armeabi-v7a|x86_64|x86|universal|noarch)\b',
                     parent_text
                 ))
                 has_dpi = bool(re.search(
@@ -655,13 +671,26 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
                     r'\bandroid\s+\d',
                     parent_text
                 ))
+                has_package_type = bool(re.search(
+                    r'\b(?:apk|bundle|aab)\b',
+                    parent_text
+                ))
 
-                if has_arch and (has_dpi or has_android):
+                if has_arch and (has_dpi or has_android) and has_package_type:
+                    best_container = parent
                     container = parent
                 else:
-                    break
+                    # If we already found a complete metadata container,
+                    # stop before climbing into a large page section that
+                    # could combine multiple variants.
+                    if best_container is not None:
+                        break
+                    container = parent
 
-            variant = _extract_variant(container, len(variants))
+            if best_container is None:
+                continue
+
+            variant = _extract_variant(best_container, len(variants))
             if not variant:
                 continue
 
