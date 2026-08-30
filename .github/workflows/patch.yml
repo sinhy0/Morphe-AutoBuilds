@@ -183,6 +183,15 @@ jobs:
           
           python -m src
 
+      - name: Upload APKMirror Debug HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apkmirror-debug-${{ matrix.app_name }}-${{ matrix.source }}
+          path: apkmirror_debug.html
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Record Build Outputs
         if: always()
         env:
