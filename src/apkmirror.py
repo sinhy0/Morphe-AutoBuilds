@@ -462,139 +462,69 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         logging.error(f"Could not find any release page for {app_name} {version}")
         return None
     
-    # --- VARIANT FINDER ---
+       # --- VARIANT FINDER ---
     #
-    # Final automatic selection rules:
+    # Automatic APKMirror variant selection:
     #
-    # 1. Architecture priority:
-    #       arm64-v8a
-    #       universal (only if arm64-v8a does not exist)
-    #
-    # 2. DPI:
-    #       - If an exact DPI range exists, prefer the most specific
-    #         range (e.g. 480-640dpi over 120-640dpi).
-    #       - Otherwise choose the highest DPI available.
-    #       - If no suitable DPI is found, use nodpi.
-    #
-    # 3. If multiple variants are identical:
-    #       - Minimum Android version closest to Android 12, then lower.
+    # 1. arm64-v8a has priority.
+    # 2. APK and BUNDLE are both accepted.
+    # 3. DPI selection:
+    #       - Prefer 480-640dpi when it exists.
+    #       - If it does not exist, choose the highest DPI/range
+    #         inside 480-640.
+    #       - If nothing exists inside 480-640, choose the highest
+    #         available DPI/range outside the range.
+    #       - If no DPI variant exists, use nodpi.
+    # 4. If arm64-v8a does not exist at all, use universal and
+    #    apply the same DPI rules.
+    # 5. If variants are otherwise identical:
+    #       - Minimum Android version closest to Android 12,
+    #         without going above Android 12.
     #       - Smaller file size.
-    #       - First variant on the page as final fallback.
+    #       - First variant on the page.
     #
-    # 4. Accepted types:
-    #       APK and BUNDLE
-    #
-    # 5. Never intentionally select armeabi-v7a, x86 or x86_64.
-
-    rows = found_soup.find_all(
-        'div',
-        class_='table-row headerFont'
-    )
-
-    download_page_url = None
-
-    requested_arch = str(
-        target_arch or config.get('arch', 'arm64-v8a')
-    ).strip().lower()
-
-    requested_dpi = str(
-        config.get('dpi', '')
-    ).strip().lower()
+    # The parser intentionally does NOT depend on one specific
+    # APKMirror CSS class for the download link.
 
     # ---------------------------------------------------------
-    # Parse optional DPI range.
-    #
-    # If dpi is empty, the range is considered automatic.
+    # Helpers
     # ---------------------------------------------------------
 
-    dpi_range_match = re.search(
-        r'(\d+)\s*-\s*(\d+)\s*dpi',
-        requested_dpi,
-        re.IGNORECASE
-    )
+    def _clean_text(value):
+        return re.sub(
+            r'\s+',
+            ' ',
+            value or ''
+        ).strip()
 
-    if dpi_range_match:
-        configured_dpi_min = int(
-            dpi_range_match.group(1)
-        )
-        configured_dpi_max = int(
-            dpi_range_match.group(2)
-        )
-        automatic_dpi = False
-    else:
-        single_dpi_match = re.search(
-            r'(\d+)\s*dpi',
-            requested_dpi,
-            re.IGNORECASE
-        )
+    def _extract_android_version(text):
+        text = _clean_text(text).lower()
 
-        if single_dpi_match:
-            configured_dpi_min = int(
-                single_dpi_match.group(1)
-            )
-            configured_dpi_max = int(
-                single_dpi_match.group(1)
-            )
-            automatic_dpi = False
-        else:
-            configured_dpi_min = None
-            configured_dpi_max = None
-            automatic_dpi = True
-
-    # ---------------------------------------------------------
-    # Android version helper
-    # ---------------------------------------------------------
-
-    android_version_map = {
-        "android 16": 16,
-        "android 15": 15,
-        "android 14": 14,
-        "android 13": 13,
-        "android 12": 12,
-        "android 11": 11,
-        "android 10": 10,
-        "android 9": 9,
-        "android 8.1": 8.1,
-        "android 8": 8,
-        "android 7.1": 7.1,
-        "android 7": 7,
-        "android 6": 6,
-        "android 5.1": 5.1,
-        "android 5": 5,
-    }
-
-    def extract_android_version(text):
-        lower = text.lower()
-
+        # Examples:
         # Android 12+
-        matches = re.findall(
+        # Android 9.0+
+        # Android 8.1+
+        match = re.search(
             r'android\s+(\d+(?:\.\d+)?)',
-            lower,
+            text,
             re.IGNORECASE
         )
 
-        if matches:
+        if match:
             try:
-                return max(
-                    float(value)
-                    for value in matches
-                )
+                return float(match.group(1))
             except ValueError:
                 pass
 
-        for name, value in android_version_map.items():
-            if name in lower:
-                return value
-
-        # APKMirror sometimes uses API levels.
-        api_match = re.search(
-            r'(?:android\s+)?api[-\s]?(\d+)',
-            lower,
+        # API level fallback
+        match = re.search(
+            r'(?:api[-\s]?)(\d+)',
+            text,
             re.IGNORECASE
         )
 
-        if api_match:
-            api = int(api_match.group(1))
+        if match:
+            api = int(match.group(1))
 
             api_map = {
                 35: 15,
@@ -618,16 +548,12 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
         return None
 
-    # ---------------------------------------------------------
-    # File size helper
-    # ---------------------------------------------------------
-
-    def extract_size(text):
-        lower = text.lower()
+    def _extract_file_size(text):
+        text = _clean_text(text).lower()
 
         matches = re.findall(
             r'(\d+(?:\.\d+)?)\s*(gb|mb|kb|b)\b',
-            lower,
+            text,
             re.IGNORECASE
         )
 
@@ -640,65 +566,129 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             value = float(value)
 
             if unit == 'gb':
-                value *= 1024 * 1024 * 1024
+                value *= 1024 ** 3
             elif unit == 'mb':
-                value *= 1024 * 1024
+                value *= 1024 ** 2
             elif unit == 'kb':
                 value *= 1024
-            else:
-                pass
 
             sizes.append(value)
 
-        return min(sizes) if sizes else float('inf')
+        return min(sizes)
 
-    # ---------------------------------------------------------
-    # Extract one APKMirror variant
-    # ---------------------------------------------------------
+    def _extract_variant_link(row):
+        """
+        APKMirror has changed its HTML structure over time.
+        Do not depend exclusively on class='accent_color'.
+        """
 
-    def extract_variant(row, index):
-
-        text = row.get_text(
-            " ",
-            strip=True
+        # Preferred: link whose href points to /apk/...
+        links = row.find_all(
+            'a',
+            href=True
         )
+
+        candidates = []
+
+        for link in links:
+            href = link.get('href', '').strip()
+
+            if not href:
+                continue
+
+            text = _clean_text(
+                link.get_text(
+                    " ",
+                    strip=True
+                )
+            ).lower()
+
+            classes = " ".join(
+                link.get('class', [])
+            ).lower()
+
+            score = 0
+
+            if '/apk/' in href:
+                score += 10
+
+            if 'download' in text:
+                score += 5
+
+            if 'download' in classes:
+                score += 5
+
+            if 'accent_color' in classes:
+                score += 3
+
+            candidates.append(
+                (
+                    score,
+                    link
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True
+        )
+
+        href = candidates[0][1].get(
+            'href'
+        )
+
+        return href
+
+    def _extract_variant(row, index):
+        text = _clean_text(
+            row.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if not text:
+            return None
 
         lower = text.lower()
 
-        # APK
+        # -----------------------------------------------------
+        # Type
+        # -----------------------------------------------------
+
         is_apk = bool(
             re.search(
-                r'\bAPK\b',
-                text,
-                re.IGNORECASE
+                r'\bapk\b',
+                lower
             )
         )
 
-        # BUNDLE / AAB
         is_bundle = bool(
             re.search(
-                r'\b(?:BUNDLE|APK\s+BUNDLE|AAB)\b',
-                text,
-                re.IGNORECASE
+                r'\b(?:bundle|apk\s+bundle|aab)\b',
+                lower
             )
         )
 
-        if not (is_apk or is_bundle):
+        if not (
+            is_apk
+            or is_bundle
+        ):
             return None
 
         # -----------------------------------------------------
-        # Architecture detection
+        # Architecture
         # -----------------------------------------------------
 
         architectures = set()
 
-        architecture_matches = re.findall(
+        for architecture in re.findall(
             r'\b(?:arm64-v8a|armeabi-v7a|x86_64|x86|universal)\b',
-            lower,
-            re.IGNORECASE
-        )
-
-        for architecture in architecture_matches:
+            lower
+        ):
             architectures.add(
                 architecture.lower()
             )
@@ -711,8 +701,7 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
         for low, high in re.findall(
             r'(\d+)\s*-\s*(\d+)\s*dpi',
-            lower,
-            re.IGNORECASE
+            lower
         ):
             dpi_ranges.append(
                 (
@@ -722,23 +711,27 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             )
 
         # -----------------------------------------------------
-        # Individual DPI values
+        # Individual DPI
         # -----------------------------------------------------
 
         dpis = []
 
         for match in re.finditer(
-            r'(\d+)\s*dpi',
-            lower,
-            re.IGNORECASE
+            r'(?<!-)(\d+)\s*dpi\b',
+            lower
         ):
             dpi = int(
                 match.group(1)
             )
 
-            # Do not add the two sides of a range separately.
+            # Skip numbers belonging to a range.
+            start = max(
+                0,
+                match.start() - 12
+            )
+
             before = lower[
-                max(0, match.start() - 10):
+                start:
                 match.start()
             ]
 
@@ -748,7 +741,9 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             ):
                 continue
 
-            dpis.append(dpi)
+            dpis.append(
+                dpi
+            )
 
         dpis = sorted(
             set(dpis),
@@ -762,16 +757,15 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         is_nodpi = bool(
             re.search(
                 r'\bnodpi\b',
-                lower,
-                re.IGNORECASE
+                lower
             )
         )
 
         # -----------------------------------------------------
-        # Minimum Android version
+        # Android minimum version
         # -----------------------------------------------------
 
-        android_version = extract_android_version(
+        android_version = _extract_android_version(
             text
         )
 
@@ -779,24 +773,16 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         # File size
         # -----------------------------------------------------
 
-        file_size = extract_size(
+        file_size = _extract_file_size(
             text
         )
 
         # -----------------------------------------------------
-        # Download link
+        # Link
         # -----------------------------------------------------
 
-        href_element = row.find(
-            'a',
-            class_='accent_color'
-        )
-
-        if not href_element:
-            return None
-
-        href = href_element.get(
-            'href'
+        href = _extract_variant_link(
+            row
         )
 
         if not href:
@@ -818,14 +804,51 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         }
 
     # ---------------------------------------------------------
-    # Build variants
+    # Find candidate rows
     # ---------------------------------------------------------
+
+    rows = found_soup.find_all(
+        'div',
+        class_='table-row'
+    )
+
+    # Some APKMirror pages may use additional containers.
+    # If the normal rows are not found, inspect elements that
+    # contain both an architecture and an APK/BUNDLE marker.
+
+    if not rows:
+        rows = []
+
+        for element in found_soup.find_all(
+            ['div', 'tr', 'li']
+        ):
+            text = _clean_text(
+                element.get_text(
+                    " ",
+                    strip=True
+                )
+            ).lower()
+
+            if (
+                re.search(
+                    r'\b(?:arm64-v8a|universal|armeabi-v7a|x86_64|x86)\b',
+                    text
+                )
+                and
+                re.search(
+                    r'\b(?:apk|bundle|aab)\b',
+                    text
+                )
+            ):
+                rows.append(
+                    element
+                )
 
     variants = []
 
     for index, row in enumerate(rows):
 
-        variant = extract_variant(
+        variant = _extract_variant(
             row,
             index
         )
@@ -835,191 +858,305 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
                 variant
             )
 
+    logging.info(
+        f"Detected {len(variants)} APKMirror variants "
+        f"for {app_name} {version}"
+    )
+
+    # Debug: show detected variants.
+    for variant in variants:
+        logging.info(
+            "Variant: "
+            f"arch={sorted(variant['architectures'])}, "
+            f"dpi_ranges={variant['dpi_ranges']}, "
+            f"dpis={variant['dpis']}, "
+            f"nodpi={variant['is_nodpi']}, "
+            f"type="
+            f"{'APK' if variant['is_apk'] else 'BUNDLE'}"
+        )
+
     # ---------------------------------------------------------
-    # DPI scoring
+    # DPI ranking
     # ---------------------------------------------------------
 
-    def dpi_score(variant):
+    DPI_MIN = 480
+    DPI_MAX = 640
 
-        # -----------------------------------------------------
-        # nodpi is deliberately NOT considered here.
-        # It is the fallback after normal DPI selection.
-        # -----------------------------------------------------
+    def _range_score(
+        low,
+        high
+    ):
+        """
+        Ranking for DPI ranges.
 
-        # =====================================================
-        # Automatic DPI
-        #
-        # No dpi configured:
-        #
-        # Prefer a range first.
-        # More specific/narrower range wins.
-        # If ranges are identical, higher upper bound wins.
-        # =====================================================
+        Exact 480-640 has the highest priority.
 
-        if automatic_dpi:
+        Other ranges inside 480-640 are ranked by:
+        1. being inside the target range
+        2. highest upper DPI
+        3. narrowest range
+        """
 
-            if variant["dpi_ranges"]:
-
-                best_range = min(
-                    variant["dpi_ranges"],
-                    key=lambda r: (
-                        r[1] - r[0],
-                        -r[1],
-                        -r[0]
-                    )
-                )
-
-                low, high = best_range
-
-                return (
-                    3,
-                    -(high - low),
-                    high,
-                    high
-                )
-
-            # Then individual DPI.
-            if variant["dpis"]:
-
-                return (
-                    2,
-                    0,
-                    max(variant["dpis"]),
-                    max(variant["dpis"])
-                )
-
-            return None
-
-        # =====================================================
-        # Configured DPI range
-        # =====================================================
-
-        if variant["dpi_ranges"]:
-
-            exact = []
-
-            for low, high in variant["dpi_ranges"]:
-
-                if (
-                    low == configured_dpi_min
-                    and high == configured_dpi_max
-                ):
-                    exact.append(
-                        (low, high)
-                    )
-
-            if exact:
-
-                low, high = exact[0]
-
-                return (
-                    4,
-                    0,
-                    high,
-                    high
-                )
-
-        # -----------------------------------------------------
-        # Individual DPI inside configured range
-        # -----------------------------------------------------
-
-        inside = [
-            dpi
-            for dpi in variant["dpis"]
-            if (
-                configured_dpi_min
-                <= dpi
-                <= configured_dpi_max
-            )
-        ]
-
-        if inside:
-
-            best = max(
-                inside
+        # Exact requested range
+        if (
+            low == DPI_MIN
+            and high == DPI_MAX
+        ):
+            return (
+                4,
+                high,
+                -(high - low)
             )
 
+        # Range completely inside 480-640
+        if (
+            low >= DPI_MIN
+            and high <= DPI_MAX
+        ):
             return (
                 3,
-                best,
-                best,
-                best
+                high,
+                -(high - low)
+            )
+
+        # Range overlaps target range.
+        overlap = (
+            min(
+                high,
+                DPI_MAX
+            )
+            -
+            max(
+                low,
+                DPI_MIN
+            )
+            + 1
+        )
+
+        if overlap > 0:
+            return (
+                2,
+                min(high, DPI_MAX),
+                -abs(
+                    high - low
+                )
+            )
+
+        # Outside target range.
+        return (
+            1,
+            high,
+            -(high - low)
+        )
+
+    def _dpi_score(
+        variant
+    ):
+        """
+        Higher score wins.
+        None means that the variant has no usable DPI.
+        """
+
+        # nodpi is handled only as fallback.
+        if variant["is_nodpi"]:
+            return None
+
+        scores = []
+
+        # -----------------------------------------------------
+        # Ranges
+        # -----------------------------------------------------
+
+        for low, high in variant[
+            "dpi_ranges"
+        ]:
+            scores.append(
+                _range_score(
+                    low,
+                    high
+                )
             )
 
         # -----------------------------------------------------
-        # DPI outside configured range
+        # Individual DPI
         # -----------------------------------------------------
 
-        outside = [
-            dpi
-            for dpi in variant["dpis"]
-            if not (
-                configured_dpi_min
+        for dpi in variant[
+            "dpis"
+        ]:
+            if (
+                DPI_MIN
                 <= dpi
-                <= configured_dpi_max
+                <= DPI_MAX
+            ):
+                scores.append(
+                    (
+                        3,
+                        dpi,
+                        0
+                    )
+                )
+            else:
+                scores.append(
+                    (
+                        1,
+                        dpi,
+                        0
+                    )
+                )
+
+        if not scores:
+            return None
+
+        return max(
+            scores
+        )
+
+    # ---------------------------------------------------------
+    # Tie breaker
+    # ---------------------------------------------------------
+
+    def _tie_break(
+        candidates
+    ):
+        if not candidates:
+            return None
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # -----------------------------------------------------
+        # Minimum Android version:
+        #
+        # Prefer the highest version <= Android 12.
+        # If none exists, choose the closest to 12.
+        # -----------------------------------------------------
+
+        below_or_equal = [
+            variant
+            for variant in candidates
+            if (
+                variant["android_version"]
+                is not None
+                and
+                variant["android_version"]
+                <= 12
             )
         ]
 
-        if outside:
-
-            best = max(
-                outside
+        if below_or_equal:
+            best_android = max(
+                variant["android_version"]
+                for variant in below_or_equal
             )
 
-            return (
-                2,
-                best,
-                best,
-                best
+            candidates = [
+                variant
+                for variant in below_or_equal
+                if variant["android_version"]
+                == best_android
+            ]
+
+        else:
+
+            known = [
+                variant
+                for variant in candidates
+                if variant["android_version"]
+                is not None
+            ]
+
+            if known:
+
+                closest = min(
+                    abs(
+                        variant["android_version"]
+                        - 12
+                    )
+                    for variant in known
+                )
+
+                candidates = [
+                    variant
+                    for variant in known
+                    if abs(
+                        variant["android_version"]
+                        - 12
+                    ) == closest
+                ]
+
+        # -----------------------------------------------------
+        # Smaller file size.
+        # -----------------------------------------------------
+
+        if len(candidates) > 1:
+
+            smallest = min(
+                variant["file_size"]
+                for variant in candidates
             )
 
-        return None
+            candidates = [
+                variant
+                for variant in candidates
+                if variant["file_size"]
+                == smallest
+            ]
+
+        # -----------------------------------------------------
+        # Final fallback:
+        # first one on the APKMirror page.
+        # -----------------------------------------------------
+
+        candidates.sort(
+            key=lambda variant:
+                variant["index"]
+        )
+
+        return candidates[0]
 
     # ---------------------------------------------------------
-    # Select variant
+    # Select architecture
     # ---------------------------------------------------------
 
-    def select_best_variant(
+    def _select_for_architecture(
         architecture
     ):
 
-        architecture = architecture.lower()
-
-        matching = [
+        candidates = [
             variant
             for variant in variants
             if architecture
             in variant["architectures"]
         ]
 
-        if not matching:
+        if not candidates:
             return None
 
+        logging.info(
+            f"Found {len(candidates)} variants "
+            f"for architecture {architecture}"
+        )
+
         # -----------------------------------------------------
-        # Remove nodpi temporarily.
-        # nodpi is only used as fallback.
+        # Normal DPI variants
         # -----------------------------------------------------
 
-        normal_variants = [
+        normal = [
             variant
-            for variant in matching
+            for variant in candidates
             if not variant["is_nodpi"]
         ]
 
-        # -----------------------------------------------------
-        # Normal DPI selection
-        # -----------------------------------------------------
-
         scored = []
 
-        for variant in normal_variants:
+        for variant in normal:
 
-            score = dpi_score(
+            score = _dpi_score(
                 variant
             )
 
             if score is not None:
-
                 scored.append(
                     (
                         score,
@@ -1029,192 +1166,100 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
         if scored:
 
-            # Highest DPI/range priority first.
+            # Higher DPI score first.
             scored.sort(
-                key=lambda item: (
-                    item[0],
-                    1 if item[1]["is_apk"]
-                    else 0,
-                    item[1]["index"]
-                ),
+                key=lambda item: item[0],
                 reverse=True
             )
 
             best_score = scored[0][0]
 
-            tied = [
+            best = [
                 variant
                 for score, variant in scored
                 if score == best_score
             ]
 
-            # -------------------------------------------------
-            # Tie breaker 1:
-            # Minimum Android version closest to Android 12,
-            # but never above Android 12.
-            # -------------------------------------------------
-
-            if len(tied) > 1:
-
-                below_12 = [
-                    variant
-                    for variant in tied
-                    if (
-                        variant["android_version"]
-                        is not None
-                        and variant["android_version"] <= 12
-                    )
-                ]
-
-                if below_12:
-
-                    below_12.sort(
-                        key=lambda variant: (
-                            variant["android_version"],
-                            -variant["file_size"],
-                            -variant["index"]
-                        ),
-                        reverse=True
-                    )
-
-                    tied = [
-                        below_12[0]
-                    ]
-
-                else:
-
-                    known_versions = [
-                        variant
-                        for variant in tied
-                        if variant["android_version"]
-                        is not None
-                    ]
-
-                    if known_versions:
-
-                        known_versions.sort(
-                            key=lambda variant: (
-                                abs(
-                                    variant["android_version"]
-                                    - 12
-                                ),
-                                -variant["file_size"],
-                                -variant["index"]
-                            )
-                        )
-
-                        tied = [
-                            known_versions[0]
-                        ]
-
-            # -------------------------------------------------
-            # Tie breaker 2:
-            # Smaller file size.
-            # -------------------------------------------------
-
-            if len(tied) > 1:
-
-                tied.sort(
-                    key=lambda variant: (
-                        variant["file_size"],
-                        variant["index"]
-                    )
-                )
-
-                tied = [
-                    tied[0]
-                ]
-
-            # -------------------------------------------------
-            # Tie breaker 3:
-            # First variant on page.
-            # -------------------------------------------------
-
-            return tied[0]
+            return _tie_break(
+                best
+            )
 
         # -----------------------------------------------------
-        # No normal DPI variant:
-        # fallback to nodpi.
+        # No DPI match -> nodpi
         # -----------------------------------------------------
 
-        nodpi_variants = [
+        nodpi = [
             variant
-            for variant in matching
+            for variant in candidates
             if variant["is_nodpi"]
         ]
 
-        if nodpi_variants:
+        if nodpi:
 
-            # Same tie-breaking logic for nodpi.
-            nodpi_variants.sort(
-                key=lambda variant: (
-                    0
-                    if variant["android_version"]
-                    is None
-                    else abs(
-                        variant["android_version"]
-                        - 12
-                    ),
-                    variant["file_size"],
-                    variant["index"]
-                )
+            logging.info(
+                f"No normal DPI variant for "
+                f"{architecture}; using nodpi"
             )
 
-            return nodpi_variants[0]
-
-        # -----------------------------------------------------
-        # Absolute final fallback:
-        # Any APK/BUNDLE for this architecture.
-        # This prevents DPI from causing failure.
-        # -----------------------------------------------------
-
-        if matching:
-
-            matching.sort(
-                key=lambda variant: (
-                    variant["file_size"],
-                    variant["index"]
-                )
+            return _tie_break(
+                nodpi
             )
 
-            return matching[0]
+        # -----------------------------------------------------
+        # Absolute fallback:
+        # any APK/BUNDLE for this architecture.
+        # -----------------------------------------------------
 
-        return None
+        logging.info(
+            f"No DPI information for "
+            f"{architecture}; using first available "
+            f"APK/BUNDLE"
+        )
+
+        return _tie_break(
+            candidates
+        )
 
     # =========================================================
-    # STEP 1
-    # arm64-v8a
+    # 1. arm64-v8a
     # =========================================================
 
-    selected_variant = select_best_variant(
-        "arm64-v8a"
-    )
+    arm64_variants = [
+        variant
+        for variant in variants
+        if "arm64-v8a"
+        in variant["architectures"]
+    ]
 
-    if selected_variant:
+    if arm64_variants:
+
+        selected_variant = _select_for_architecture(
+            "arm64-v8a"
+        )
 
         selected_arch = "arm64-v8a"
 
     else:
 
         # =====================================================
-        # STEP 2
-        # universal ONLY when arm64-v8a doesn't exist
+        # 2. universal
         # =====================================================
 
-        arm64_exists = any(
-            "arm64-v8a"
-            in variant["architectures"]
-            for variant in variants
+        logging.info(
+            f"No arm64-v8a variant exists for "
+            f"{app_name} {version}; trying universal"
         )
 
-        if not arm64_exists:
+        universal_variants = [
+            variant
+            for variant in variants
+            if "universal"
+            in variant["architectures"]
+        ]
 
-            logging.info(
-                f"No arm64-v8a variant exists for "
-                f"{app_name} {version}; trying universal"
-            )
+        if universal_variants:
 
-            selected_variant = select_best_variant(
+            selected_variant = _select_for_architecture(
                 "universal"
             )
 
@@ -1222,22 +1267,18 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
         else:
 
-            logging.error(
-                f"arm64-v8a exists for "
-                f"{app_name} {version}, but no usable "
-                f"variant was found."
-            )
-
-            return None
+            selected_variant = None
+            selected_arch = None
 
     # =========================================================
-    # STEP 3
-    # Final selection
+    # Final result
     # =========================================================
 
     if selected_variant:
 
-        href = selected_variant["href"]
+        href = selected_variant[
+            "href"
+        ]
 
         download_page_url = (
             href
@@ -1251,19 +1292,36 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             else "BUNDLE"
         )
 
-        selected_dpi = (
-            "nodpi"
-            if selected_variant["is_nodpi"]
-            else (
-                selected_variant["dpis"][0]
-                if selected_variant["dpis"]
-                else (
-                    selected_variant["dpi_ranges"][0]
-                    if selected_variant["dpi_ranges"]
-                    else "unknown"
-                )
+        if selected_variant["is_nodpi"]:
+
+            selected_dpi = "nodpi"
+
+        elif selected_variant["dpi_ranges"]:
+
+            # Show the highest-priority range.
+            selected_range = max(
+                selected_variant["dpi_ranges"],
+                key=lambda r:
+                    _range_score(
+                        r[0],
+                        r[1]
+                    )
             )
-        )
+
+            selected_dpi = (
+                f"{selected_range[0]}-"
+                f"{selected_range[1]}dpi"
+            )
+
+        elif selected_variant["dpis"]:
+
+            selected_dpi = (
+                f"{selected_variant['dpis'][0]}dpi"
+            )
+
+        else:
+
+            selected_dpi = "unknown"
 
         logging.info(
             f"✓ Selected {selected_type} variant: "
@@ -1277,7 +1335,7 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
 
         logging.info(
             f"✓ Variant row: "
-            f"{selected_variant['text'][:300]}"
+            f"{selected_variant['text'][:500]}"
         )
 
     else:
