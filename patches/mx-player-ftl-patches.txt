@@ -1,4 +1,0 @@
-+ Hide File Transfer, Video Playlist, Private Folder tiles
-+ Hide Me tab promo items
-+ Hide local tiles banner
-+ Skip welcome screen
